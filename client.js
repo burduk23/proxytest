@@ -2,7 +2,7 @@ require('dotenv').config();
 const socks = require('socksv5');
 const WebSocket = require('ws');
 
-const VERSION = '1.2.0';
+const VERSION = '1.3.0';
 const LOCAL_PORT = process.env.LOCAL_PORT || 1080;
 const REMOTE_URL = process.env.REMOTE_URL || 'https://proxy-il1y.onrender.com';
 const AUTH_USER = process.env.AUTH_USER || 'dandon';
@@ -11,6 +11,11 @@ const AUTH_STR = `${AUTH_USER}:${AUTH_PASS}`;
 
 const SOCKS_USER = process.env.SOCKS_USER || 'dandon';
 const SOCKS_PASS = process.env.SOCKS_PASS || 'pulk';
+
+// ЗАЩИТА ОТ БАНА RENDER: Лимит 80 одновременных соединений.
+// У бесплатного Render лимит 100, мы оставляем запас для стабильности.
+const MAX_CONCURRENT_CONNECTIONS = 80;
+let activeConnections = 0;
 
 const getWsUrl = (url) => {
   let wsUrl = url.trim();
@@ -24,28 +29,46 @@ const getWsUrl = (url) => {
 
 const WS_TARGET = getWsUrl(REMOTE_URL);
 
-console.log(`[Client v${VERSION}] Starting SOCKS5 bridge...`);
+console.log(`[Client v${VERSION}] Starting SOCKS5 Proxy...`);
 
 const srv = socks.createServer((info, accept, deny) => {
   const targetLabel = `${info.dstAddr}:${info.dstPort}`;
   
-  // ВАЖНО: Мы НЕ вызываем accept(true) сразу. 
-  // Мы ждем, пока мост на Render подтвердит соединение.
+  // 1. Проверяем лимит соединений, чтобы не спровоцировать бан от Render (Ошибка 502)
+  if (activeConnections >= MAX_CONCURRENT_CONNECTIONS) {
+    console.warn(`[LIMIT] Denied ${targetLabel}. Active: ${activeConnections}/${MAX_CONCURRENT_CONNECTIONS}`);
+    return deny();
+  }
+
+  // 2. Сразу подтверждаем SOCKS-соединение для Android (чтобы не было "вечного подключения")
+  const clientSocket = accept(true);
+  if (!clientSocket) return;
+
+  activeConnections++;
+  let isCleanedUp = false;
+  let isBridgeReady = false;
+  const buffer = [];
+
+  const cleanup = () => {
+    if (!isCleanedUp) {
+      isCleanedUp = true;
+      activeConnections--;
+      clearInterval(pingInterval);
+      if (clientSocket) clientSocket.destroy();
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) ws.close();
+    }
+  };
 
   const ws = new WebSocket(WS_TARGET, {
     headers: { 'User-Agent': `Proxy-Client/${VERSION}` },
     handshakeTimeout: 15000
   });
 
-  let clientSocket = null;
-  let isBridgeReady = false;
-
   const pingInterval = setInterval(() => {
     if (ws.readyState === WebSocket.OPEN) ws.ping();
   }, 20000);
 
   ws.on('open', () => {
-    // console.log(`[WS] Tunnel request for ${targetLabel}`);
     ws.send(JSON.stringify({
       auth: AUTH_STR,
       host: info.dstAddr,
@@ -60,64 +83,43 @@ const srv = socks.createServer((info, accept, deny) => {
         const msg = JSON.parse(data.toString());
         if (msg.status === 'connected') {
           isBridgeReady = true;
-          console.log(`[WS] OK -> ${targetLabel}`);
-          
-          // ТЕПЕРЬ подтверждаем SOCKS-соединение, когда мост реально готов
-          clientSocket = accept(true);
-          if (!clientSocket) {
-            ws.close();
-            return;
+          console.log(`[WS] OK -> ${targetLabel} (Connections: ${activeConnections})`);
+          // Сбрасываем накопленные данные в туннель
+          while (buffer.length > 0) {
+            ws.send(buffer.shift(), { binary: true });
           }
-
-          clientSocket.on('data', (d) => {
-            if (ws.readyState === WebSocket.OPEN) ws.send(d, { binary: true });
-          });
-
-          clientSocket.on('close', () => {
-            if (ws.readyState === WebSocket.OPEN) ws.close(1000);
-          });
-
-          clientSocket.on('error', (err) => {
-            clientSocket.destroy();
-          });
         } else {
-          console.error(`[WS] Server rejected ${targetLabel}: ${msg.message || 'Unknown'}`);
-          deny();
-          ws.close();
+          console.error(`[WS] Server rejected ${targetLabel}`);
+          cleanup();
         }
       } catch (e) {
-        deny();
-        ws.close();
+        cleanup();
       }
     } else {
-      if (clientSocket && clientSocket.writable) {
-        clientSocket.write(data);
-      }
+      if (clientSocket.writable) clientSocket.write(data);
     }
   });
 
-  ws.on('close', (code) => {
-    clearInterval(pingInterval);
-    if (!isBridgeReady) {
-      console.log(`[WS] Failed to connect to ${targetLabel} (Code: ${code})`);
-      deny(); // Сообщаем приложению, что этот IP недоступен
+  clientSocket.on('data', (data) => {
+    if (isBridgeReady) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(data, { binary: true });
     } else {
-      if (clientSocket) clientSocket.destroy();
+      // Буферизуем данные от телефона, пока Render просыпается
+      buffer.push(data);
+      if (buffer.length > 300) cleanup(); // Защита от переполнения
     }
   });
 
-  ws.on('error', (err) => {
-    clearInterval(pingInterval);
-    console.error(`[WS Error] ${targetLabel}: ${err.message}`);
-    if (!isBridgeReady) deny();
-    if (clientSocket) clientSocket.destroy();
-  });
+  ws.on('close', cleanup);
+  ws.on('error', cleanup);
+  clientSocket.on('close', cleanup);
+  clientSocket.on('error', cleanup);
 });
 
 srv.listen(LOCAL_PORT, '0.0.0.0', () => {
   console.log(`--------------------------------------------------`);
   console.log(`SOCKS5 Proxy v${VERSION} on port ${LOCAL_PORT}`);
-  console.log(`Tunnel: ${WS_TARGET}`);
+  console.log(`Limit: ${MAX_CONCURRENT_CONNECTIONS} concurrent connections`);
   console.log(`--------------------------------------------------`);
 });
 
@@ -125,4 +127,6 @@ srv.useAuth(socks.auth.UserPassword((user, password, cb) => {
   cb(user === SOCKS_USER && password === SOCKS_PASS);
 }));
 
-process.on('uncaughtException', (err) => console.error('[Fatal]', err.message));
+process.on('uncaughtException', (err) => {
+  if (err.code !== 'ECONNRESET') console.error('[Fatal]', err.message);
+});
