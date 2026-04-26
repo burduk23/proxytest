@@ -2,6 +2,7 @@ require('dotenv').config();
 const socks = require('socksv5');
 const WebSocket = require('ws');
 
+const VERSION = '1.1.2';
 const LOCAL_PORT = process.env.LOCAL_PORT || 1080;
 const REMOTE_URL = process.env.REMOTE_URL || 'https://proxy-il1y.onrender.com';
 const AUTH_USER = process.env.AUTH_USER || 'dandon';
@@ -23,28 +24,27 @@ const getWsUrl = (url) => {
 
 const WS_TARGET = getWsUrl(REMOTE_URL);
 
-/**
- * SOCKS5 Server with improved reliability
- */
+console.log(`[Client v${VERSION}] Starting...`);
+
 const srv = socks.createServer((info, accept, deny) => {
   const targetLabel = `${info.dstAddr}:${info.dstPort}`;
   const clientSocket = accept(true);
   if (!clientSocket) return;
 
   const ws = new WebSocket(WS_TARGET, {
-    headers: { 'User-Agent': 'SOCKS5-WS-Tunnel-Client/1.1' }
+    headers: { 'User-Agent': `Proxy-Client/${VERSION}` },
+    handshakeTimeout: 10000
   });
 
   let isBridgeReady = false;
   const buffer = [];
 
-  // Heartbeat to prevent Render from closing idle connection
+  // Пинг сервера каждые 20 секунд для поддержания жизни на Render
   const pingInterval = setInterval(() => {
     if (ws.readyState === WebSocket.OPEN) ws.ping();
   }, 20000);
 
   ws.on('open', () => {
-    console.log(`[WS] Tunnel opening for ${targetLabel}`);
     ws.send(JSON.stringify({
       auth: AUTH_STR,
       host: info.dstAddr,
@@ -59,13 +59,12 @@ const srv = socks.createServer((info, accept, deny) => {
         const msg = JSON.parse(data.toString());
         if (msg.status === 'connected') {
           isBridgeReady = true;
-          console.log(`[WS] Bridge established to ${targetLabel}`);
-          // Flush buffer
+          console.log(`[WS] OK -> ${targetLabel}`);
           while (buffer.length > 0) {
             ws.send(buffer.shift(), { binary: true });
           }
         } else {
-          console.error(`[WS] Bridge rejected: ${msg.message || 'Unknown'}`);
+          console.error(`[WS] Rejected: ${msg.message || 'Unknown error'}`);
           ws.close();
         }
       } catch (e) {
@@ -81,23 +80,22 @@ const srv = socks.createServer((info, accept, deny) => {
       if (ws.readyState === WebSocket.OPEN) ws.send(data, { binary: true });
     } else {
       buffer.push(data);
-      if (buffer.length > 300) {
-        console.warn(`[SOCKS] Buffer overflow for ${targetLabel}`);
+      if (buffer.length > 500) { // Лимит буфера
         clientSocket.destroy();
         ws.close();
       }
     }
   });
 
-  ws.on('close', (code, reason) => {
+  ws.on('close', (code) => {
     clearInterval(pingInterval);
-    console.log(`[WS] Closed for ${targetLabel} (Code: ${code})`);
+    if (code !== 1000) console.log(`[WS] Closed: ${targetLabel} (Code: ${code})`);
     clientSocket.destroy();
   });
 
   ws.on('error', (err) => {
     clearInterval(pingInterval);
-    console.error(`[WS] Error for ${targetLabel}: ${err.message}`);
+    console.error(`[WS Error] ${targetLabel}: ${err.message}`);
     clientSocket.destroy();
   });
 
@@ -108,13 +106,14 @@ const srv = socks.createServer((info, accept, deny) => {
 });
 
 srv.listen(LOCAL_PORT, '0.0.0.0', () => {
-  console.log(`SOCKS5 Proxy v1.1 running on port ${LOCAL_PORT}`);
-  console.log(`Target: ${WS_TARGET}`);
+  console.log(`--------------------------------------------------`);
+  console.log(`SOCKS5 Proxy v${VERSION} on port ${LOCAL_PORT}`);
+  console.log(`Tunnel: ${WS_TARGET}`);
+  console.log(`--------------------------------------------------`);
 });
 
 srv.useAuth(socks.auth.UserPassword((user, password, cb) => {
   cb(user === SOCKS_USER && password === SOCKS_PASS);
 }));
 
-process.on('unhandledRejection', (r) => console.error('Rejection:', r));
-process.on('uncaughtException', (e) => console.error('Exception:', e));
+process.on('uncaughtException', (err) => console.error('[Fatal]', err.message));
