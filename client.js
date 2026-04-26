@@ -140,7 +140,8 @@ srv.listen(LOCAL_PORT, '0.0.0.0', () => {
   console.log(`--------------------------------------------------`);
   console.log(`SOCKS5 Proxy Server running on port ${LOCAL_PORT}`);
   console.log(`Tunneling via WebSocket to: ${WS_TARGET}`);
-  console.log(`Auth: ${AUTH_STR}`);
+  console.log(`Local SOCKS5 Auth: ${SOCKS_USER}:${SOCKS_PASS}`);
+  console.log(`Remote WS Auth: ${AUTH_STR}`);
   console.log(`--------------------------------------------------`);
 });
 
