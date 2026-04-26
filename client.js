@@ -1,3 +1,4 @@
+require('dotenv').config();
 const socks = require('socksv5');
 const WebSocket = require('ws');
 

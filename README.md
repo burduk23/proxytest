@@ -54,7 +54,15 @@ sudo npm install -g pm2
 
 ### Шаг 5. Настройка переменных окружения и запуск
 
-Перед запуском необходимо задать переменные окружения. Вы можете сделать это прямо при запуске через PM2.
+Для настройки логина, пароля и других параметров необходимо создать файл `.env` в папке с проектом и добавить в него переменные.
+
+Пример содержимого файла `.env`:
+```env
+REMOTE_URL=https://ваш-адрес-на-render.onrender.com
+SOCKS_USER=ваш_логин
+SOCKS_PASS=ваш_пароль
+LOCAL_PORT=1080
+```
 
 Основные переменные:
 - `REMOTE_URL` — адрес вашего сервера на Render (например, `https://proxy-il1y.onrender.com`).
@@ -65,7 +73,7 @@ sudo npm install -g pm2
 Запустите клиент с помощью PM2:
 
 ```bash
-REMOTE_URL="https://ваш-адрес-на-render.onrender.com" SOCKS_USER="ваш_логин" SOCKS_PASS="ваш_пароль" pm2 start client.js --name "socks5-client"
+pm2 start client.js --name "proxy-tunnel"
 ```
 
 Сохраните список процессов PM2, чтобы они запускались после перезагрузки сервера:
