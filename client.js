@@ -2,9 +2,6 @@ require('dotenv').config();
 const socks = require('socksv5');
 const WebSocket = require('ws');
 
-/**
- * Configuration
- */
 const LOCAL_PORT = process.env.LOCAL_PORT || 1080;
 const REMOTE_URL = process.env.REMOTE_URL || 'https://proxy-il1y.onrender.com';
 const AUTH_USER = process.env.AUTH_USER || 'dandon';
@@ -14,7 +11,6 @@ const AUTH_STR = `${AUTH_USER}:${AUTH_PASS}`;
 const SOCKS_USER = process.env.SOCKS_USER || 'dandon';
 const SOCKS_PASS = process.env.SOCKS_PASS || 'pulk';
 
-// Convert https:// to wss:// or http:// to ws://
 const getWsUrl = (url) => {
   let wsUrl = url.trim();
   if (wsUrl.startsWith('http')) {
@@ -28,33 +24,27 @@ const getWsUrl = (url) => {
 const WS_TARGET = getWsUrl(REMOTE_URL);
 
 /**
- * SOCKS5 Server
+ * SOCKS5 Server with improved reliability
  */
 const srv = socks.createServer((info, accept, deny) => {
   const targetLabel = `${info.dstAddr}:${info.dstPort}`;
-  console.log(`[SOCKS] Incoming request to ${targetLabel}`);
-  
-  // accept(true) allows us to handle the stream ourselves
   const clientSocket = accept(true);
-  if (!clientSocket) {
-    console.error(`[SOCKS] Failed to accept connection to ${targetLabel}`);
-    return;
-  }
+  if (!clientSocket) return;
 
-  console.log(`[WS] Opening tunnel to ${WS_TARGET} for ${targetLabel}`);
   const ws = new WebSocket(WS_TARGET, {
-    // Optional: Add headers if needed for some proxy environments
-    headers: {
-      'User-Agent': 'SOCKS5-WS-Tunnel-Client/1.0'
-    }
+    headers: { 'User-Agent': 'SOCKS5-WS-Tunnel-Client/1.1' }
   });
 
   let isBridgeReady = false;
   const buffer = [];
 
+  // Heartbeat to prevent Render from closing idle connection
+  const pingInterval = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) ws.ping();
+  }, 20000);
+
   ws.on('open', () => {
-    console.log(`[WS] Connected to bridge server for ${targetLabel}`);
-    // Send handshake
+    console.log(`[WS] Tunnel opening for ${targetLabel}`);
     ws.send(JSON.stringify({
       auth: AUTH_STR,
       host: info.dstAddr,
@@ -64,103 +54,67 @@ const srv = socks.createServer((info, accept, deny) => {
 
   ws.on('message', (data, isBinary) => {
     if (!isBridgeReady) {
-      if (isBinary) return; // Handshake is JSON
-      
+      if (isBinary) return;
       try {
         const msg = JSON.parse(data.toString());
         if (msg.status === 'connected') {
           isBridgeReady = true;
           console.log(`[WS] Bridge established to ${targetLabel}`);
-          
-          // Flush any buffered data from client
+          // Flush buffer
           while (buffer.length > 0) {
             ws.send(buffer.shift(), { binary: true });
           }
         } else {
-          console.error(`[WS] Server rejected connection: ${msg.message || 'Unknown error'}`);
+          console.error(`[WS] Bridge rejected: ${msg.message || 'Unknown'}`);
           ws.close();
         }
       } catch (e) {
-        console.error(`[WS] Handshake parse error: ${e.message}`);
         ws.close();
       }
     } else {
-      // Forward data from WS to SOCKS client
-      if (clientSocket.writable) {
-        clientSocket.write(data);
-      }
+      if (clientSocket.writable) clientSocket.write(data);
     }
   });
 
-  // Forward data from SOCKS client to WS
   clientSocket.on('data', (data) => {
     if (isBridgeReady) {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(data, { binary: true });
-      }
+      if (ws.readyState === WebSocket.OPEN) ws.send(data, { binary: true });
     } else {
-      // Buffer data until bridge is ready
       buffer.push(data);
-      if (buffer.length > 100) { // Safety limit
-        console.warn(`[SOCKS] Buffer overflow for ${targetLabel}, closing.`);
+      if (buffer.length > 300) {
+        console.warn(`[SOCKS] Buffer overflow for ${targetLabel}`);
         clientSocket.destroy();
         ws.close();
       }
     }
   });
 
-  // Cleanup on WS close
   ws.on('close', (code, reason) => {
-    console.log(`[WS] Connection closed for ${targetLabel} (Code: ${code})`);
-    clientSocket.end();
-  });
-
-  ws.on('error', (err) => {
-    console.error(`[WS] Error for ${targetLabel}:`, err.message);
+    clearInterval(pingInterval);
+    console.log(`[WS] Closed for ${targetLabel} (Code: ${code})`);
     clientSocket.destroy();
   });
 
-  // Cleanup on SOCKS close
-  clientSocket.on('close', () => {
-    console.log(`[SOCKS] Connection closed for ${targetLabel}`);
-    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-      ws.close();
-    }
+  ws.on('error', (err) => {
+    clearInterval(pingInterval);
+    console.error(`[WS] Error for ${targetLabel}: ${err.message}`);
+    clientSocket.destroy();
   });
 
-  clientSocket.on('error', (err) => {
-    console.error(`[SOCKS] Error for ${targetLabel}:`, err.message);
-    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-      ws.close();
-    }
+  clientSocket.on('close', () => {
+    clearInterval(pingInterval);
+    if (ws.readyState === WebSocket.OPEN) ws.close(1000);
   });
 });
 
 srv.listen(LOCAL_PORT, '0.0.0.0', () => {
-  console.log(`--------------------------------------------------`);
-  console.log(`SOCKS5 Proxy Server running on port ${LOCAL_PORT}`);
-  console.log(`Tunneling via WebSocket to: ${WS_TARGET}`);
-  console.log(`Local SOCKS5 Auth: ${SOCKS_USER}:${SOCKS_PASS}`);
-  console.log(`Remote WS Auth: ${AUTH_STR}`);
-  console.log(`--------------------------------------------------`);
+  console.log(`SOCKS5 Proxy v1.1 running on port ${LOCAL_PORT}`);
+  console.log(`Target: ${WS_TARGET}`);
 });
 
 srv.useAuth(socks.auth.UserPassword((user, password, cb) => {
-  if (user === SOCKS_USER && password === SOCKS_PASS) {
-    cb(true);
-  } else {
-    console.warn(`[SOCKS] Auth failed for user: ${user}`);
-    cb(false);
-  }
+  cb(user === SOCKS_USER && password === SOCKS_PASS);
 }));
 
-/**
- * Global Error Handling
- */
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection:', reason);
-});
-
-process.on('uncaughtException', (err) => {
-  console.error('Uncaught Exception:', err);
-});
+process.on('unhandledRejection', (r) => console.error('Rejection:', r));
+process.on('uncaughtException', (e) => console.error('Exception:', e));
