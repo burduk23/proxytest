@@ -10,6 +10,9 @@ const AUTH_USER = process.env.AUTH_USER || 'dandon';
 const AUTH_PASS = process.env.AUTH_PASS || 'pulk';
 const AUTH_STR = `${AUTH_USER}:${AUTH_PASS}`;
 
+const SOCKS_USER = process.env.SOCKS_USER || 'dandon';
+const SOCKS_PASS = process.env.SOCKS_PASS || 'pulk';
+
 // Convert https:// to wss:// or http:// to ws://
 const getWsUrl = (url) => {
   let wsUrl = url.trim();
@@ -140,7 +143,14 @@ srv.listen(LOCAL_PORT, '0.0.0.0', () => {
   console.log(`--------------------------------------------------`);
 });
 
-srv.useAuth(socks.auth.None());
+srv.useAuth(socks.auth.UserPassword((user, password, cb) => {
+  if (user === SOCKS_USER && password === SOCKS_PASS) {
+    cb(true);
+  } else {
+    console.warn(`[SOCKS] Auth failed for user: ${user}`);
+    cb(false);
+  }
+}));
 
 /**
  * Global Error Handling
